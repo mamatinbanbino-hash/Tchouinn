@@ -1,0 +1,47 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isAdmin() { return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
+    function validPost(d) {
+      return d.keys().hasOnly(['title','category','city','price','whatsapp','description','shots','views','reports','termsV','uid','author','createdAt'])
+        && d.title is string && d.title.size() >= 3 && d.title.size() <= 80
+        && d.category in ['Coiffure et beauté','Cuisine et traiteur','Réparation','Plomberie et électricité','Mécanique et auto','Ménage','Jardinage','Bricolage','Informatique et téléphone','Couture et mode','Photo et vidéo','Événements et animation','Cours à domicile','Transport et déménagement','Livraison','Autre']
+        && d.city is string && d.city.size() >= 2 && d.city.size() <= 60
+        && d.price is number && d.price >= 0 && d.price <= 100000000
+        && d.whatsapp is string && d.whatsapp.matches('^[0-9]{8,15}$')
+        && d.description is string && d.description.size() >= 20 && d.description.size() <= 5000
+        && d.shots is list && d.shots.size() <= 4
+        && d.author is string && d.author.size() <= 20
+        && d.views == 0 && d.reports == 0 && d.termsV == 'v1'
+        && d.uid == request.auth.uid && d.createdAt == request.time;
+    }
+    // 1 publication toutes les 2 minutes par compte
+    match /users/{uid} {
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['lastPost']) && request.resource.data.lastPost == request.time;
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['lastPost']) && request.resource.data.lastPost == request.time
+        && request.time > resource.data.lastPost + duration.value(2, 'm');
+    }
+    match /admins/{uid} { allow get: if signedIn() && request.auth.uid == uid; }
+    match /services/{id} {
+      allow read: if true;
+      allow create: if signedIn() && validPost(request.resource.data)
+        && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.lastPost == request.time;
+      allow delete: if signedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      // une vue et un signalement maximum par compte, jamais sur sa propre annonce
+      allow update: if signedIn() && resource.data.uid != request.auth.uid && (
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views'])
+          && request.resource.data.views == resource.data.get('views', 0) + 1
+          && !exists(/databases/$(database)/documents/services/$(id)/viewers/$(request.auth.uid))
+          && existsAfter(/databases/$(database)/documents/services/$(id)/viewers/$(request.auth.uid)))
+        || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reports'])
+          && request.resource.data.reports == resource.data.get('reports', 0) + 1
+          && !exists(/databases/$(database)/documents/services/$(id)/reports/$(request.auth.uid))
+          && existsAfter(/databases/$(database)/documents/services/$(id)/reports/$(request.auth.uid))));
+      match /viewers/{uid} { allow create: if signedIn() && request.auth.uid == uid; }
+      match /reports/{uid} { allow create: if signedIn() && request.auth.uid == uid; allow read: if isAdmin(); }
+    }
+  }
+}
